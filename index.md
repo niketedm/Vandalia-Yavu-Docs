@@ -10,9 +10,7 @@ Documento de referencia para el equipo de Yavu sobre cómo enviar eventos de com
 | Entorno    | URL de webhook                                     |
 |-----------|-----------------------------------------------------|
 | Producción | `https://mdw.vandalia.com.ar/api/webhooks/yavu/`   |
-| Desarrollo | URL de pruebas que se acordará por canal privado (túnel https tipo ngrok) |
 
-> La URL de desarrollo se entregará separada de este documento, junto con las credenciales necesarias.
 
 ---
 
