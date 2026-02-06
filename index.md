@@ -9,7 +9,7 @@ Documento de referencia para el equipo de Yavu sobre cómo enviar eventos de com
 
 | Entorno    | URL de webhook                                     |
 |-----------|-----------------------------------------------------|
-| Producción | `https://mdw.vandalia.com.ar/api/webhooks/yavu/`   |
+| Producción | `https://app.vandalia.com.ar/api/webhooks/yavu/`   |
 
 
 ---
