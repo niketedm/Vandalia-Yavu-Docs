@@ -91,14 +91,24 @@ Cualquier otro campo que se envíe se almacena para trazabilidad y diagnóstico 
 
 - **200 OK**  
   - El JSON es válido y contiene `event` y `referencia`.
-  - El evento fue **recibido** y se intentó procesar internamente.
-  - Errores de negocio (orden no encontrada, imposibilidad de aplicar la acción) no cambian el código HTTP (se informan en el cuerpo).
+  - El evento fue **recibido y procesado** correctamente.
 
 - **400 Bad Request**  
   - JSON mal formado, o falta alguno de los campos obligatorios (`event`, `referencia`).
 
 - **401 Unauthorized** (si se activa la firma de seguridad)  
   - Firma ausente o inválida en el header `X-Yavu-Signature`.
+
+- **404 Not Found**
+  - La `referencia` no existe en Vandalia.
+  - Para eventos de empaquetado (`comprobante.packed_despacho`, `comprobante.packed_retiro`), también se devuelve cuando la referencia no está en estado pendiente de empaquetado.
+
+- **409 Conflict**
+  - Evento de empaquetado duplicado para una orden que ya se encuentra `packed`.
+
+- **422 Unprocessable Entity**
+  - El evento es sintácticamente válido, pero inválido por reglas de negocio.
+  - Ejemplo: `comprobante.packed_despacho` para una orden de tipo `pickup`, o `comprobante.packed_retiro` para una orden de tipo `ship`.
 
 - **5xx**  
   - Error interno no esperado. En este caso, Yavu puede **reintentar** el envío más adelante.
@@ -133,14 +143,39 @@ Ejemplo:
 }
 ```
 
-Cuando **no** existe integración/orden para la referencia enviada:
+Cuando **no** existe integración/orden para la referencia enviada (**404**):
+
+```json
+{
+  "error": "referencia_no_encontrada",
+  "message": "Orden no encontrada para la referencia indicada.",
+  "event": "comprobante.packed_despacho",
+  "referencia": "1884818991"
+}
+```
+
+Cuando el evento de empaquetado llega duplicado (**409**):
+
+```json
+{
+  "error": "evento_empaquetado_duplicado",
+  "message": "La referencia ya tiene registrado el evento de empaquetado.",
+  "event": "comprobante.packed_despacho",
+  "referencia": "1884818991"
+}
+```
+
+Cuando el evento no coincide con el tipo logístico de la orden (**422**):
 
 ```json
 {
   "received": true,
   "event": "comprobante.packed_despacho",
   "referencia": "1884818991",
-  "order_found": false
+  "order_found": true,
+  "processed": false,
+  "error": "invalid_event_for_order_shipping_type",
+  "message": "Evento comprobante.packed_despacho inválido para esta orden: la logística en Tienda Nube es pickup."
 }
 ```
 
@@ -195,18 +230,19 @@ En todos los webhooks relacionados con ese comprobante, `referencia` debe ser `"
 
 - El receptor de los webhooks está preparado para recibir el **mismo evento varias veces** para la misma `referencia`.
 - Cada request se registra con su payload completo para trazabilidad.
-- Yavu **no necesita** hacer deduplicación estricta para esta primera versión: si un evento se reenvía, el sistema:
-  - Vuelve a registrar el evento.
-  - Aplica la lógica de negocio de forma idempotente (sin duplicar efectos).
+- Para empaquetado, Vandalia aplica deduplicación explícita: un segundo webhook equivalente devuelve `409 Conflict`.
 
 **Recomendación de reintentos:**
 
 - Reintentar el webhook cuando:
   - Se reciba un **5xx**.
   - Haya un timeout de red.
-- **No** es necesario reintentar cuando:
-  - La respuesta sea **200 OK** (aunque `processed` sea `false`; el error ya quedó registrado internamente).
-  - La respuesta sea **400** o **401**: en esos casos hay un problema de payload o autenticación que debe corregirse antes de reintentar.
+- Reintentar **solo luego de corregir datos** cuando:
+  - Se reciba **404** por referencia inexistente o no pendiente para empaquetado.
+  - Se reciba **422** por incompatibilidad entre tipo de evento y logística real de la orden.
+- **No** reintentar sin cambios cuando:
+  - Se reciba **409** (evento duplicado ya aplicado).
+  - Se reciba **400** o **401** (problema de payload o autenticación).
 
 ---
 
@@ -237,4 +273,38 @@ En todos los webhooks relacionados con ese comprobante, `referencia` debe ser `"
    - Verificar:
      - Código HTTP.
      - Campos `received`, `order_found`, `processed` en la respuesta.
+
+---
+
+## 9. Manejo de errores
+
+Esta sección resume los errores que Yavu puede recibir y cómo actuar.
+
+| HTTP | `error` (si aplica) | Significado | Acción recomendada en Yavu |
+|------|----------------------|-------------|-----------------------------|
+| `400` | `invalid JSON` / `event and referencia are required` | Payload inválido o incompleto. | Corregir formato y reenviar. |
+| `401` | `invalid signature` | Firma ausente o inválida. | Revisar `X-Yavu-Signature` y secreto compartido. |
+| `404` | `referencia_no_encontrada` | No existe orden/integración para la referencia. | Verificar referencia enviada desde Yavu. |
+| `404` | `referencia_no_encontrada_para_empaquetado` | La referencia existe pero no está en estado apto para empaquetado. | Validar estado de la orden antes de disparar packed. |
+| `409` | `evento_empaquetado_duplicado` | Se recibió un packed duplicado para orden ya empaquetada. | Tomar como idempotente; no reenviar. |
+| `422` | `invalid_event_for_order_shipping_type` | El evento no corresponde al tipo logístico de la orden (`ship`/`pickup`). | Corregir mapeo de evento o logística y reenviar. |
+| `500` | (variable) | Error interno no esperado. | Reintentar con backoff exponencial. |
+
+Notas operativas:
+
+- `404`, `409` y `422` son respuestas de negocio esperadas en escenarios puntuales.
+- Para `409`, el efecto de negocio ya estaba aplicado previamente.
+- Para `422`, la corrección debe hacerse en reglas o datos antes de reintentar.
+
+---
+
+## 10. Changelog
+
+### 2026-04-24
+
+- Se actualizó la documentación de respuestas HTTP del webhook de Yavu.
+- Se incorporaron códigos de negocio adicionales: `404`, `409`, `422`.
+- Se documentó el caso de deduplicación de packed (`evento_empaquetado_duplicado`).
+- Se documentó la validación logística `ship` vs `pickup` (`invalid_event_for_order_shipping_type`).
+- Se agregó la sección **Manejo de errores** con acciones recomendadas por código.
 
